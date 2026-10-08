@@ -142,14 +142,14 @@ class QuestionRequest(BaseModel):
 def parse_question_rule_based(q: str) -> str:
     q_low = q.lower()
 
-    # 1. Status & Intent
-    is_refund = any(w in q_low for w in ["refund", "refunded", "returns"])
-    is_void = any(w in q_low for w in ["void", "cancelled", "canceled"])
-    is_count_orders = any(w in q_low for w in ["how many order", "number of order", "count of order", "orders were", "orders placed"])
-    is_count_customers = any(w in q_low for w in ["how many customer", "unique customer", "distinct customer", "number of customer"])
-    is_quantity = any(w in q_low for w in ["how many unit", "total quantity", "quantity of", "units of", "units sold"])
-    is_highest_prod = any(w in q_low for w in ["which product", "best selling product", "top product", "highest revenue", "most revenue", "most popular product"]) and "product" in q_low
-    is_highest_cust = any(w in q_low for w in ["which customer", "top customer", "customer spent the most", "customer with highest"])
+    # 1. Determine Status Filter
+    status_filter = None
+    if any(w in q_low for w in ["refund", "refunded", "returns"]):
+        status_filter = "refunded"
+    elif any(w in q_low for w in ["void", "cancelled", "canceled"]):
+        status_filter = "void"
+    elif any(w in q_low for w in ["paid", "bought", "buy", "purchased", "purchase", "sold", "sales", "revenue", "gross", "earned", "income"]):
+        status_filter = "paid"
 
     # 2. Extract Region
     regions = ["North", "South", "East", "West", "Central"]
@@ -185,53 +185,78 @@ def parse_question_rule_based(q: str) -> str:
             found_month = m_num
             break
 
-    # Build SQL WHERE conditions
+    # 6. Extract Quarter
+    quarter_months = None
+    if re.search(r"\b(q1|1st quarter|first quarter)\b", q_low):
+        quarter_months = (1, 3)
+    elif re.search(r"\b(q2|2nd quarter|second quarter)\b", q_low):
+        quarter_months = (4, 6)
+    elif re.search(r"\b(q3|3rd quarter|third quarter)\b", q_low):
+        quarter_months = (7, 9)
+    elif re.search(r"\b(q4|4th quarter|fourth quarter)\b", q_low):
+        quarter_months = (10, 12)
+
+    # 7. Intent flags
+    is_count_customers = any(w in q_low for w in ["customer", "customers"]) and any(w in q_low for w in ["how many", "number of", "count of", "distinct", "unique"])
+    is_count_orders = any(w in q_low for w in ["how many order", "number of order", "count of order", "orders were", "orders placed"])
+    is_quantity = any(w in q_low for w in ["how many unit", "total quantity", "quantity of", "units of", "units sold"]) or ("quantity" in q_low and "highest" not in q_low and "lowest" not in q_low)
+    
+    is_which_prod = any(w in q_low for w in ["which product", "best selling product", "top product", "most popular product"]) or ("product" in q_low and any(w in q_low for w in ["highest", "most", "top", "best", "lowest", "least"]))
+    is_which_cust = any(w in q_low for w in ["which customer", "top customer", "customer spent the most", "customer with highest"])
+    is_which_region = any(w in q_low for w in ["which region", "top region", "region with highest", "region had the highest", "region generated"])
+
+    is_avg = any(w in q_low for w in ["average", "avg", "mean"])
+    is_order_desc = not any(w in q_low for w in ["lowest", "least", "bottom", "worst"])
+
+    # Base WHERE clauses
     where_clauses = []
-    if found_region:
+    if status_filter:
+        where_clauses.append(f"status = '{status_filter}'")
+    if found_region and not is_which_region:
         where_clauses.append(f"region = '{found_region}'")
-    if found_product and not is_highest_prod:
+    if found_product and not is_which_prod:
         where_clauses.append(f"product = '{found_product}'")
     if found_year:
         where_clauses.append(f"business_year = {found_year}")
     if found_month:
         where_clauses.append(f"business_month = {found_month}")
+    elif quarter_months:
+        where_clauses.append(f"business_month BETWEEN {quarter_months[0]} AND {quarter_months[1]}")
 
-    # Construct the final SQL
-    if is_highest_prod:
-        where = " AND ".join(["status = 'paid'"] + where_clauses)
-        return f"SELECT product FROM orders WHERE {where} GROUP BY product ORDER BY SUM(usd_amount) DESC LIMIT 1"
+    where_str = " AND ".join(where_clauses) if where_clauses else "1=1"
+    order_dir = "DESC" if is_order_desc else "ASC"
 
-    if is_highest_cust:
-        where = " AND ".join(["status = 'paid'"] + where_clauses)
-        return f"SELECT customer FROM orders WHERE {where} GROUP BY customer ORDER BY SUM(usd_amount) DESC LIMIT 1"
+    # Route by intent
+    if is_which_prod:
+        order_col = "SUM(qty)" if "unit" in q_low or "quantity" in q_low else "SUM(usd_amount)"
+        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        return f"SELECT product FROM orders WHERE {s_filter}{where_str} GROUP BY product ORDER BY {order_col} {order_dir} LIMIT 1"
+
+    if is_which_cust:
+        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        return f"SELECT customer FROM orders WHERE {s_filter}{where_str} GROUP BY customer ORDER BY SUM(usd_amount) {order_dir} LIMIT 1"
+
+    if is_which_region:
+        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        return f"SELECT region FROM orders WHERE {s_filter}{where_str} GROUP BY region ORDER BY SUM(usd_amount) {order_dir} LIMIT 1"
 
     if is_count_customers:
-        where = " AND ".join(where_clauses) if where_clauses else "1=1"
-        return f"SELECT COUNT(DISTINCT customer) FROM orders WHERE {where}"
+        return f"SELECT COUNT(DISTINCT customer) FROM orders WHERE {where_str}"
 
     if is_quantity:
-        where = " AND ".join(["status = 'paid'"] + where_clauses)
-        return f"SELECT SUM(qty) FROM orders WHERE {where}"
-
-    if is_refund:
-        if is_count_orders:
-            where = " AND ".join(["status = 'refunded'"] + where_clauses)
-            return f"SELECT COUNT(*) FROM orders WHERE {where}"
-        else:
-            where = " AND ".join(["status = 'refunded'"] + where_clauses)
-            return f"SELECT ROUND(SUM(usd_amount), 2) FROM orders WHERE {where}"
-
-    if is_void:
-        where = " AND ".join(["status = 'void'"] + where_clauses)
-        return f"SELECT COUNT(*) FROM orders WHERE {where}"
+        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        return f"SELECT SUM(qty) FROM orders WHERE {s_filter}{where_str}"
 
     if is_count_orders:
-        where = " AND ".join(where_clauses) if where_clauses else "1=1"
-        return f"SELECT COUNT(*) FROM orders WHERE {where}"
+        return f"SELECT COUNT(*) FROM orders WHERE {where_str}"
 
-    # Default assumption: Revenue calculation
-    where = " AND ".join(["status = 'paid'"] + where_clauses)
-    return f"SELECT ROUND(SUM(usd_amount), 2) FROM orders WHERE {where}"
+    if is_avg:
+        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        return f"SELECT ROUND(AVG(usd_amount), 2) FROM orders WHERE {s_filter}{where_str}"
+
+    # Default: Revenue / Money
+    s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+    return f"SELECT ROUND(SUM(usd_amount), 2) FROM orders WHERE {s_filter}{where_str}"
 
 
 # =====================================================================
