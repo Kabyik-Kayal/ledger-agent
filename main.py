@@ -334,7 +334,7 @@ def generate_sql_with_llm(question: str) -> str:
 # =====================================================================
 @app.get("/")
 def health_check():
-    return {"status": "ok", "service": "Acme Ledger Agent"}
+    return {"status": "ok", "service": "Acme Ledger Agent", "version": "1.1"}
 
 
 @app.post("/")
