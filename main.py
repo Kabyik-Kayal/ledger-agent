@@ -140,36 +140,90 @@ class QuestionRequest(BaseModel):
 # ZERO-KEY RULE-BASED QUERY PARSER (Works 100% offline without any API key)
 # =====================================================================
 def parse_question_rule_based(q: str) -> str:
-    q_low = q.lower()
+    # Normalize hyphens, underscores, and punctuation
+    q_clean = q.lower().replace("-", " ").replace("_", " ")
+    q_clean = re.sub(r"[^\w\s]", " ", q_clean)
+    words = q_clean.split()
+    q_norm = " " + " ".join(words) + " "
 
-    # 1. Determine Status Filter
+    # 1. Target Entity: What is the question asking for?
+    # Product target (e.g. "top-selling product by revenue", "which product")
+    is_product_target = any(phrase in q_norm for phrase in [
+        " which product ", " what product ", " top selling product ", " best selling product ",
+        " top product ", " product was ", " product had ", " product by revenue ",
+        " product by sales ", " product by quantity ", " product by units ",
+        " most popular product ", " least popular product "
+    ]) or ((" product " in q_norm or " appliance " in q_norm or " item " in q_norm) and any(w in q_norm for w in [" which ", " top ", " best ", " highest ", " lowest ", " least ", " most "]) and " how many " not in q_norm and " revenue " not in q_norm[:15])
+
+    # Customer target (e.g. "which customer", "who spent the most")
+    is_customer_target = any(phrase in q_norm for phrase in [
+        " which customer ", " what customer ", " top customer ", " best customer ",
+        " who spent the most ", " who placed the most ", " customer spent the most ",
+        " customer had the highest "
+    ])
+
+    # Region target (e.g. "which region had the highest revenue")
+    is_region_target = any(phrase in q_norm for phrase in [
+        " which region ", " what region ", " top region ", " region had the highest ",
+        " region generated the highest ", " region had the most "
+    ])
+
+    # Distinct Customer Count
+    is_count_customers = any(phrase in q_norm for phrase in [
+        " distinct customer ", " distinct customers ", " unique customer ", " unique customers ",
+        " how many customer ", " how many customers ", " count of customer ", " count of customers ",
+        " number of customer ", " number of customers "
+    ])
+
+    # Orders Count
+    is_count_orders = any(phrase in q_norm for phrase in [
+        " how many order ", " how many orders ", " count of order ", " count of orders ",
+        " number of order ", " number of orders ", " orders were ", " orders placed ",
+        " total orders ", " total number of orders "
+    ])
+
+    # Units / Quantity
+    is_quantity = any(phrase in q_norm for phrase in [
+        " how many unit ", " how many units ", " total units ", " total quantity ",
+        " units sold ", " quantity of ", " units of ", " quantity sold "
+    ])
+
+    # Average
+    is_avg = any(w in q_norm for w in [" average ", " avg ", " mean "])
+
+    # Refund / Void check
+    is_refund = any(w in q_norm for w in [" refund ", " refunded ", " refunds ", " return ", " returns "])
+    is_void = any(w in q_norm for w in [" void ", " voided ", " cancel ", " cancelled ", " canceled "])
+
+    # Status detection
     status_filter = None
-    if any(w in q_low for w in ["refund", "refunded", "returns"]):
+    if is_refund:
         status_filter = "refunded"
-    elif any(w in q_low for w in ["void", "cancelled", "canceled"]):
+    elif is_void:
         status_filter = "void"
-    elif any(w in q_low for w in ["paid", "bought", "buy", "purchased", "purchase", "sold", "sales", "revenue", "gross", "earned", "income"]):
+    elif any(w in q_norm for w in [" paid ", " bought ", " buy ", " purchased ", " purchase ", " sold ", " sales ", " revenue ", " gross ", " earn ", " earned "]):
         status_filter = "paid"
 
-    # 2. Extract Region
-    regions = ["North", "South", "East", "West", "Central"]
-    found_region = None
-    for r in regions:
-        if re.search(r"\b" + r.lower() + r"\b", q_low):
-            found_region = r
-            break
-
-    # 3. Extract Product (supports singular & plural)
+    # 2. Extract Product
     products = ["Blender", "Grinder", "Air Fryer", "Kettle", "Juicer", "Rice Cooker", "Mixer", "Toaster"]
     found_product = None
     for p in products:
         pattern = r"\b" + re.escape(p.lower()) + r"s?\b"
-        if re.search(pattern, q_low):
+        if re.search(pattern, q_clean):
             found_product = p
             break
 
+    # 3. Extract Region
+    regions = ["North", "South", "East", "West", "Central"]
+    found_region = None
+    for r in regions:
+        pattern = r"\b" + re.escape(r.lower()) + r"\b"
+        if re.search(pattern, q_clean):
+            found_region = r
+            break
+
     # 4. Extract Year
-    m_year = re.search(r"\b(202[0-9])\b", q)
+    m_year = re.search(r"\b(202[0-9])\b", q_clean)
     found_year = int(m_year.group(1)) if m_year else None
 
     # 5. Extract Month
@@ -181,40 +235,32 @@ def parse_question_rule_based(q: str) -> str:
     }
     found_month = None
     for m_name, m_num in months.items():
-        if re.search(r"\b" + m_name + r"\b", q_low):
+        if re.search(r"\b" + m_name + r"\b", q_clean):
             found_month = m_num
             break
 
     # 6. Extract Quarter
     quarter_months = None
-    if re.search(r"\b(q1|1st quarter|first quarter)\b", q_low):
+    if re.search(r"\b(q1|1st quarter|first quarter)\b", q_clean):
         quarter_months = (1, 3)
-    elif re.search(r"\b(q2|2nd quarter|second quarter)\b", q_low):
+    elif re.search(r"\b(q2|2nd quarter|second quarter)\b", q_clean):
         quarter_months = (4, 6)
-    elif re.search(r"\b(q3|3rd quarter|third quarter)\b", q_low):
+    elif re.search(r"\b(q3|3rd quarter|third quarter)\b", q_clean):
         quarter_months = (7, 9)
-    elif re.search(r"\b(q4|4th quarter|fourth quarter)\b", q_low):
+    elif re.search(r"\b(q4|4th quarter|fourth quarter)\b", q_clean):
         quarter_months = (10, 12)
 
-    # 7. Intent flags
-    is_count_customers = any(w in q_low for w in ["customer", "customers"]) and any(w in q_low for w in ["how many", "number of", "count of", "distinct", "unique"])
-    is_count_orders = any(w in q_low for w in ["how many order", "number of order", "count of order", "orders were", "orders placed"])
-    is_quantity = any(w in q_low for w in ["how many unit", "total quantity", "quantity of", "units of", "units sold"]) or ("quantity" in q_low and "highest" not in q_low and "lowest" not in q_low)
-    
-    is_which_prod = any(w in q_low for w in ["which product", "best selling product", "top product", "most popular product"]) or ("product" in q_low and any(w in q_low for w in ["highest", "most", "top", "best", "lowest", "least"]))
-    is_which_cust = any(w in q_low for w in ["which customer", "top customer", "customer spent the most", "customer with highest"])
-    is_which_region = any(w in q_low for w in ["which region", "top region", "region with highest", "region had the highest", "region generated"])
+    # 7. Direction: ASC vs DESC
+    is_asc = any(w in q_norm for w in [" lowest ", " least ", " bottom ", " worst ", " minimum ", " min ", " smallest "])
+    order_dir = "ASC" if is_asc else "DESC"
 
-    is_avg = any(w in q_low for w in ["average", "avg", "mean"])
-    is_order_desc = not any(w in q_low for w in ["lowest", "least", "bottom", "worst"])
-
-    # Base WHERE clauses
+    # WHERE clauses
     where_clauses = []
     if status_filter:
         where_clauses.append(f"status = '{status_filter}'")
-    if found_region and not is_which_region:
+    if found_region and not is_region_target:
         where_clauses.append(f"region = '{found_region}'")
-    if found_product and not is_which_prod:
+    if found_product and not is_product_target:
         where_clauses.append(f"product = '{found_product}'")
     if found_year:
         where_clauses.append(f"business_year = {found_year}")
@@ -224,38 +270,39 @@ def parse_question_rule_based(q: str) -> str:
         where_clauses.append(f"business_month BETWEEN {quarter_months[0]} AND {quarter_months[1]}")
 
     where_str = " AND ".join(where_clauses) if where_clauses else "1=1"
-    order_dir = "DESC" if is_order_desc else "ASC"
 
-    # Route by intent
-    if is_which_prod:
-        order_col = "SUM(qty)" if "unit" in q_low or "quantity" in q_low else "SUM(usd_amount)"
-        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+    # BUILD FINAL QUERY
+    if is_product_target:
+        order_col = "SUM(qty)" if any(w in q_norm for w in [" unit ", " units ", " volume ", " quantity "]) else "SUM(usd_amount)"
+        s_filter = "status = 'paid' AND " if "status" not in where_str else ""
         return f"SELECT product FROM orders WHERE {s_filter}{where_str} GROUP BY product ORDER BY {order_col} {order_dir} LIMIT 1"
 
-    if is_which_cust:
-        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
-        return f"SELECT customer FROM orders WHERE {s_filter}{where_str} GROUP BY customer ORDER BY SUM(usd_amount) {order_dir} LIMIT 1"
+    if is_customer_target:
+        order_col = "COUNT(*)" if " order " in q_norm or " orders " in q_norm else "SUM(usd_amount)"
+        s_filter = "status = 'paid' AND " if "status" not in where_str else ""
+        return f"SELECT customer FROM orders WHERE {s_filter}{where_str} GROUP BY customer ORDER BY {order_col} {order_dir} LIMIT 1"
 
-    if is_which_region:
-        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
-        return f"SELECT region FROM orders WHERE {s_filter}{where_str} GROUP BY region ORDER BY SUM(usd_amount) {order_dir} LIMIT 1"
+    if is_region_target:
+        order_col = "SUM(qty)" if " unit " in q_norm or " quantity " in q_norm else "SUM(usd_amount)"
+        s_filter = "status = 'paid' AND " if "status" not in where_str else ""
+        return f"SELECT region FROM orders WHERE {s_filter}{where_str} GROUP BY region ORDER BY {order_col} {order_dir} LIMIT 1"
 
     if is_count_customers:
         return f"SELECT COUNT(DISTINCT customer) FROM orders WHERE {where_str}"
 
     if is_quantity:
-        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        s_filter = "status = 'paid' AND " if "status" not in where_str else ""
         return f"SELECT SUM(qty) FROM orders WHERE {s_filter}{where_str}"
 
     if is_count_orders:
         return f"SELECT COUNT(*) FROM orders WHERE {where_str}"
 
     if is_avg:
-        s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+        s_filter = "status = 'paid' AND " if "status" not in where_str else ""
         return f"SELECT ROUND(AVG(usd_amount), 2) FROM orders WHERE {s_filter}{where_str}"
 
-    # Default: Revenue / Money
-    s_filter = "status = 'paid' AND " if "status = 'paid'" not in where_str and not status_filter else ""
+    # Default to money (revenue / refund sum)
+    s_filter = "status = 'paid' AND " if "status" not in where_str else ""
     return f"SELECT ROUND(SUM(usd_amount), 2) FROM orders WHERE {s_filter}{where_str}"
 
 
@@ -334,7 +381,7 @@ def generate_sql_with_llm(question: str) -> str:
 # =====================================================================
 @app.get("/")
 def health_check():
-    return {"status": "ok", "service": "Acme Ledger Agent", "version": "1.1"}
+    return {"status": "ok", "service": "Acme Ledger Agent", "version": "1.2"}
 
 
 @app.post("/")
